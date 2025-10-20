@@ -27,10 +27,29 @@ use File::Path qw(make_path);                 # core
 use File::Basename qw(dirname basename);      # core
 use Time::Piece;                              # core
 use Term::ReadKey;                            # core
+use English;                                  # core, for $REAL_USER_ID
 use Data::Dumper;                             # core
 Getopt::Long::Configure(qw(no_auto_abbrev));
 
 our $opts = MyGetOpts(); # Will only return with options we think we can use
+
+# Standard ISC (Vixie) cron on Linux does not set the USER environment
+# variable and VBoxManage (dumbly) requires both USER and LOGNAME to be set
+# and to match, else it reports a warning on STDOUT, which is even dumber.
+# A workaround is to prepend 'env USER=$LOGNAME' to cron jobs that run this
+# program, but I decided to add this code to eliminate that need.
+my $uid = $REAL_USER_ID;         # Get the effective user ID
+my ($username) = getpwuid($uid); # Lookup the username
+if (! defined($username)) {
+  die "Could not determine the username for UID $uid.\n";
+}
+# Set USER and LOGNAME if they are empty and bail is they mismatch
+foreach my $var (qw(USER LOGNAME)) {
+  $ENV{$var} = $username if (! (defined($ENV{$var}) && length($ENV{$var})));
+  if ($username ne $ENV{$var}) {
+    die "Env var $var=$ENV{$var} which does not match getpwuid()=$username\n";
+  }
+}
 
 # Query the list of VMs and capture the output and exit status
 my $vms_output = qx{VBoxManage list --sorted vms};
@@ -83,6 +102,8 @@ if ($opts->{verify}) {
   ReadMode 0;
   print "\n";
   exit if (uc($key) ne 'Y');
+} else {
+  print "\n";
 }
 
 # Process the backup for each VM
