@@ -43,7 +43,7 @@ my ($username) = getpwuid($uid); # Lookup the username
 if (! defined($username)) {
   die "Could not determine the username for UID $uid.\n";
 }
-# Set USER and LOGNAME if they are empty and bail is they mismatch
+# Set USER and LOGNAME if they are empty and bail if they mismatch
 foreach my $var (qw(USER LOGNAME)) {
   $ENV{$var} = $username if (! (defined($ENV{$var}) && length($ENV{$var})));
   if ($username ne $ENV{$var}) {
