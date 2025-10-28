@@ -239,7 +239,7 @@ sub GetUsageMessage {
   my $col1len = $parmlen + 3;
   my $pwlen = our $DEFAULT_PASSWD_LEN;
   my @params = (
-    [ 'listvms'    => 'List the VMs and exit..' ],
+    [ 'listvms'    => 'List the VMs and exit.' ],
     [ 'budir=s'    => 'The backup directory (target directory).' ],
     [ 'skip=s@'    => 'VMs to skip (multiple allowed).' ],
     [ 'only=s@'    => 'Only backup these VMs (multiple allowed).' ],
