@@ -1,8 +1,10 @@
 # Automated VirtualBox VM Backups
 
+## Backup_VirtualBox_VMs.pl
+
 A Perl program that automates crash-consistent backups of VirtualBox virtual machines using `VBoxManage` live snapshots and `rsync`.
 
-## Features
+### Features
 
 *   **Near-zero downtime backups:** Uses live snapshots for running VMs, allowing for backups without interrupting active services.
 *   **Efficient mirroring with `rsync`:** Optimized for both local and slow storage by using incremental mirroring (`--inplace`) to transfer only changed data, and the `--delete` option to ensure a precise replica.
@@ -13,7 +15,7 @@ A Perl program that automates crash-consistent backups of VirtualBox virtual mac
 *   **Quiet and summary-focused output:** The snapshot commands are silent, and the `rsync` output is filtered to show only a final summary, keeping the console clean.
 *   **Flexible filtering:** Allows for skipping or limiting backups to specific VMs using command-line options.
 
-## Usage Examples
+### Usage Examples
 
 ```sh
 # Backup all VMs to the --budir directory, but first show the plan and verify with the user
@@ -26,5 +28,16 @@ A Perl program that automates crash-consistent backups of VirtualBox virtual mac
 ./Backup_VirtualBox_VMs.pl --verify --budir /vol/backups/VirtualBoxVMs --skip "Win7" --skip "Fedora39"
 ```
 
+## Rclone_VirtualBox_VMs.sh
+
+A bash program that uses rclone to sync backups to cloud drives.
+
+### Features
+
+* The program breaks *.vdi files into smaller chunks (500MB by default) for more efficient cloud syncing.
+* The program uses rlcone's md5sum command and "dd | md5sum" to compare local *.vdi files to their equivalent cloud parts.
+* If a sync is needed, the program uses split to create VDI file chunks before running rclone sync.
+* The program writes and syncs a README file with instuctions for reconstituting VDI files from the parts.
+
 # Collaboration
-This script was written by Lester Hightower, in collaboration with a large language model trained by Google. 
+These programs were written by Lester Hightower, in collaboration with a large language model trained by Google. 
