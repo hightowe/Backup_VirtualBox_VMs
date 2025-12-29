@@ -170,9 +170,16 @@ for vm_dir in "${VM_DIRS[@]}"; do
     echo "$README_CONTENT" > "$vm_dir/$README_FILENAME"
     echo "  Rcloning $vm_dir to $RCLONE_DESTINATION"
 
+    # The --checksum flag was missing from an earlier version of this
+    # program and that mistake meant that every 500MB slice would sync.
+    # Though likely not needed, the --ignore-size option was also added
+    # for good measure. It should have zero impact in almost all cases,
+    # but will protect against a cloud service that might report file
+    # sizes of identical files slightly differently than the local system.
     /bin/time rclone $DRY_RUN sync "$vm_dir" "$RCLONE_DESTINATION" \
          $RCLONE_VERBOSITY $RCLONE_TRACK_RENAMES \
          "${RCLONE_FILTER_ARGS[@]}" $RCLONE_DELETE_FLAG \
+         --checksum --ignore-size \
          --delete-after \
          --checkers "$RCLONE_CHECKERS_LIMIT" \
          --transfers "$RCLONE_TRANSFERS_LIMIT" \
