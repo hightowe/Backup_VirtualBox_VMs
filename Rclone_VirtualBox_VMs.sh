@@ -37,6 +37,7 @@
 # large language model trained by Google.
 # ==============================================================================
 
+#COMPARE_ONLY=1  # Only compare VDI file parts, don't run rclone at all
 #DRY_RUN="--dry-run" # If set, will --dry-run rclone commands.
 SOURCE_BASE_DIR="/vol/2_ntfs/backups/VirtualBoxVMs"
 RCLONE_REMOTE_BASE="pcloud:/backups/VirtualBoxVMs"
@@ -53,6 +54,8 @@ README_FILENAME="README_VDI_RECONSTITUTION.txt"
 
 # Directories to skip, named as they appear under SOURCE_BASE_DIR
 SKIP_DIRS=()
+# Directories to only do, named as they appear under SOURCE_BASE_DIR
+#ONLY_DIRS=()
 
 # Define the content of the README file with reconstitution instructions
 read -r -d '' README_CONTENT << EOM
@@ -80,10 +83,11 @@ EOM
 script_killed() {
   local signal_name="$1"
   echo "--- Script killed by $signal_name at $(date) ---"
+  exit 1
 }
-trap script_killed SIGHUP
-trap script_killed SIGINT
-trap script_killed SIGTERM
+trap 'script_killed SIGHUP' SIGHUP
+trap 'script_killed SIGINT' SIGINT
+trap 'script_killed SIGTERM' SIGTERM
 
 echo "Starting VirtualBox VDI Backup with MD5 Block Pre-testing"
 echo "Source Base Directory: $SOURCE_BASE_DIR"
@@ -97,6 +101,16 @@ for vm_dir in "${VM_DIRS[@]}"; do
     for skip_dir in "${SKIP_DIRS[@]}"; do
         [[ "$DIR_NAME" == "$skip_dir" ]] && SKIP=true && break
     done
+    # If we haven't skipped yet, and the ONLY_DIRS whitelist exists, check it
+    if ! $SKIP && [[ -n "${ONLY_DIRS+x}" ]] && (( ${#ONLY_DIRS[@]} > 0 )); then
+        SKIP=true # Assume we skip unless it's in the whitelist
+        for only_dir in "${ONLY_DIRS[@]}"; do
+            if [[ "$DIR_NAME" == "$only_dir" ]]; then
+                SKIP=false
+                break
+            fi
+        done
+    fi
 
     if [ "$SKIP" == true ]; then
         echo -e "\n--- SKIPPING Directory: $DIR_NAME ---"
@@ -131,6 +145,7 @@ for vm_dir in "${VM_DIRS[@]}"; do
         BYTES_PER_CHUNK=$((CHUNK_SIZE_MB * 1024 * 1024))
         TOTAL_BLOCKS=$(( (FILE_SIZE + BYTES_PER_CHUNK - 1) / BYTES_PER_CHUNK ))
 
+        DIFFERS_CNT=0
         NEEDS_SYNC=false
         if [ ${#REMOTE_MD5S[@]} -ne $TOTAL_BLOCKS ]; then
             echo "    Block count mismatch (Local: $TOTAL_BLOCKS, Remote: ${#REMOTE_MD5S[@]}). Sync required."
@@ -145,12 +160,20 @@ for vm_dir in "${VM_DIRS[@]}"; do
                 LOCAL_MD5=$(dd if="$vdi_file" bs=1M skip=$((i * CHUNK_SIZE_MB)) count=$CHUNK_SIZE_MB 2>/dev/null | md5sum | awk '{print $1}')
 
                 if [[ "$LOCAL_MD5" != "${REMOTE_MD5S[$PART_NAME]}" ]]; then
-                    echo -e "\n    Block $PART_LABEL differs. Sync required."
+                    echo -e "    Block $PART_LABEL differs. Sync required."
+                    #echo "LOCAL_MD5=$LOCAL_MD5 REMOTE_MD5S=${REMOTE_MD5S[$PART_NAME]}"
                     NEEDS_SYNC=true
-                    break
+                    (( DIFFERS_CNT += 1 )) # Increment the DIFFERS_CNT
+                    [ "$COMPARE_ONLY" ] || break
                 fi
                 #echo -ne "    Verified md5sum for block $PART_LABEL/$((TOTAL_BLOCKS-1))\r"
             done
+        fi
+
+        if [ "$COMPARE_ONLY" ]; then
+          echo "Skipping splitting of ${vdi_file} due to COMPARE_ONLY setting."
+          echo "  ** $DIFFERS_CNT of $TOTAL_BLOCKS blocks differ"
+          continue
         fi
 
         if [ "$NEEDS_SYNC" = true ]; then
@@ -165,6 +188,12 @@ for vm_dir in "${VM_DIRS[@]}"; do
             RCLONE_DELETE_FLAG=""
         fi
     done
+
+    if [ "$COMPARE_ONLY" ]; then
+      echo "Skipping rclone of ${vdi_file} due to COMPARE_ONLY setting."
+      NEEDS_SYNC=false
+      continue
+    fi
 
     # Create README and Sync non-VDI files (or new parts)
     echo "$README_CONTENT" > "$vm_dir/$README_FILENAME"
