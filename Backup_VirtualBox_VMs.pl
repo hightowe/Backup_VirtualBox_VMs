@@ -29,6 +29,7 @@ use Time::Piece;                              # core
 use Term::ReadKey;                            # core
 use English;                                  # core, for $REAL_USER_ID
 use Data::Dumper;                             # core
+use File::Spec;                               # core
 Getopt::Long::Configure(qw(no_auto_abbrev));
 
 our $opts = MyGetOpts(); # Will only return with options we think we can use
@@ -125,6 +126,31 @@ VM: foreach my $vm_name (@vm_names) {
 
     print "  '$vm_name' at '$vm_dir' is in state: $vm_state\n";
 
+    # Collect all disk images associated with the VM from its configuration file
+    my @external_disk_args;
+    my @rsync_excludes;
+    if (open(my $fh, '<', $cfg_file)) {
+        while (my $line = <$fh>) {
+            if ($line =~ /<HardDisk\s+[^>]*?location="([^"]+)"/) {
+                my $disk_path = $1;
+                if ($disk_path !~ m{^/}) {
+                    $disk_path = "$vm_dir/$disk_path";
+                }
+                my $abs_disk_path = File::Spec->rel2abs($disk_path);
+                my $vm_dir_slash = "$vm_dir/";
+
+                if (index($abs_disk_path, $vm_dir_slash) != 0) {
+                    print "  WARNING: VM '$vm_name' uses external disk:\n    $abs_disk_path\n";
+                    push @external_disk_args, $abs_disk_path;
+                    push @rsync_excludes, "--exclude='" . basename($abs_disk_path) . "'";
+                }
+            }
+        }
+        close($fh);
+    } else {
+        warn "  Could not open config file '$cfg_file' for reading: $!\n";
+    }
+
     # Conditional snapshot logic based on VM state
     my $snapshot_name = undef; # No snapshop will be taken unless the VM is running
     if ($vm_state eq 'running') {
@@ -155,7 +181,8 @@ VM: foreach my $vm_name (@vm_names) {
 
     print "  Rsyncing '$vm_dir' to '$backup_location'...\n";
     # Capture output and print only a summary
-    my $rsync_output = qx{rsync -a --delete --inplace --stats \"$vm_dir/\" \"$backup_location/\"};
+    my $rsync_excludes_str = join(" ", @rsync_excludes);
+    my $rsync_output = qx{rsync -a --delete --inplace --stats $rsync_excludes_str \"$vm_dir/\" \"$backup_location/\"};
     if ($? != 0) {
         warn "  Rsync failed for '$vm_name' (exit code " . ($? >> 8) . "). Backup may be incomplete.\n";
     } else {
@@ -170,6 +197,19 @@ VM: foreach my $vm_name (@vm_names) {
         system("VBoxManage snapshot \"$vm_name\" delete \"$snapshot_name\"");
         if ($? != 0) {
             warn "  Failed to delete snapshot for '$vm_name' (exit code " . ($? >> 8) . "). Manual cleanup may be required.\n";
+        }
+    }
+
+    # Backup any external disks after the main sync
+    foreach my $ext_disk (@external_disk_args) {
+        print "  Rsyncing external disk '$ext_disk' to '$backup_location/'...\n";
+        my $ext_output = qx{rsync -a --inplace --stats \"$ext_disk\" \"$backup_location/\"};
+        if ($? != 0) {
+            warn "  Rsync failed for external disk '$ext_disk' (exit code " . ($? >> 8) . "). Backup may be incomplete.\n";
+        } else {
+            print "  Rsync summary for external disk:\n";
+            my @summary_lines = grep { /^(Number|Total)/ } split /\n/, $ext_output;
+            print "  $_\n" for @summary_lines;
         }
     }
 
