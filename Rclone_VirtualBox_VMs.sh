@@ -62,8 +62,8 @@ read -r -d '' README_CONTENT << EOM
 ==========================================================================
 VDI ARCHIVE RECONSTITUTION INSTRUCTIONS
 ==========================================================================
-These files are simple chunks of the original VirtualBox VDI disk image,
-created using the standard Linux 'split' command.
+The *.vdi.part.NNNN files are simple chunks of the original VirtualBox VDI
+disk image, created using the standard Linux 'split' command.
 
 To restore the original VDI file:
 
@@ -126,8 +126,9 @@ for vm_dir in "${VM_DIRS[@]}"; do
     RCLONE_DELETE_FLAG="--delete-excluded"
     RCLONE_FILTER_ARGS=("--filter" "- *.vdi") # Don't send the *.vdi files
 
-    # Capture the *.vdi files in the current VM directory
-    readarray -d '' VDI_FILES < <(find "$vm_dir" -maxdepth 1 -name "*.vdi" -print0)
+    # Capture the *.vdi files in the current VM directory.
+    # Using "-maxdepth 2" allows going into the Snapshots/ folder.
+    readarray -d '' VDI_FILES < <(find "$vm_dir" -maxdepth 2 -name "*.vdi" -print0)
 
     for vdi_file in "${VDI_FILES[@]}"; do
         VDI_NAME=$(basename "$vdi_file")
