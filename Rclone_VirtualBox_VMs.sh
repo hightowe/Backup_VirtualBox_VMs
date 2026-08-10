@@ -92,7 +92,19 @@ trap 'script_killed SIGTERM' SIGTERM
 echo "Starting VirtualBox VDI Backup with MD5 Block Pre-testing"
 echo "Source Base Directory: $SOURCE_BASE_DIR"
 
+echo -e "\n=== Running Pre-flight Check for Remote Storage & MD5 Hashes ==="
+if ! rclone lsd "$RCLONE_REMOTE_BASE" >/dev/null 2>&1; then
+    echo -e "\n======================================================================"
+    echo " FATAL ERROR: Cannot access RCLONE_REMOTE_BASE ($RCLONE_REMOTE_BASE)."
+    echo " Please check network connection, rclone remote configuration, or path."
+    echo "======================================================================\n"
+    exit 1
+fi
+
 readarray -d '' VM_DIRS < <(find "$SOURCE_BASE_DIR" -mindepth 1 -maxdepth 1 -type d -print0)
+
+declare -A ALL_REMOTE_MD5S=()
+PREFLIGHT_FAILED=false
 
 for vm_dir in "${VM_DIRS[@]}"; do
     DIR_NAME=$(basename "$vm_dir")
@@ -102,6 +114,96 @@ for vm_dir in "${VM_DIRS[@]}"; do
         [[ "$DIR_NAME" == "$skip_dir" ]] && SKIP=true && break
     done
     # If we haven't skipped yet, and the ONLY_DIRS whitelist exists, check it
+    if ! $SKIP && [[ -n "${ONLY_DIRS+x}" ]] && (( ${#ONLY_DIRS[@]} > 0 )); then
+        SKIP=true
+        for only_dir in "${ONLY_DIRS[@]}"; do
+            if [[ "$DIR_NAME" == "$only_dir" ]]; then
+                SKIP=false
+                break
+            fi
+        done
+    fi
+
+    if [ "$SKIP" == true ]; then
+        echo "  [Pre-flight] Skipping directory: $DIR_NAME"
+        continue
+    fi
+
+    RELATIVE_PATH=$(realpath --relative-to="$SOURCE_BASE_DIR" "$vm_dir")
+    RCLONE_DESTINATION="$RCLONE_REMOTE_BASE/$RELATIVE_PATH"
+
+    readarray -d '' VDI_FILES < <(find "$vm_dir" -maxdepth 2 -name "*.vdi" -print0)
+
+    for vdi_file in "${VDI_FILES[@]}"; do
+        VDI_NAME=$(basename "$vdi_file")
+        VDI_DIR=$(dirname "$vdi_file")
+        VDI_REL_DIR=$(realpath --relative-to="$SOURCE_BASE_DIR" "$VDI_DIR")
+        VDI_RCLONE_DEST="$RCLONE_REMOTE_BASE/$VDI_REL_DIR"
+
+        # Escape curly braces for rclone include filter pattern (e.g. VirtualBox Snapshot GUIDs)
+        ESCAPED_VDI_NAME=$(echo "$VDI_NAME" | sed 's/{/\\{/g; s/}/\\}/g')
+
+        echo "  [Pre-flight] Fetching remote MD5 checksums for $DIR_NAME / $VDI_NAME"
+
+        max_retries=3
+        attempt=1
+        md5_output=""
+        rclone_exit=0
+
+        while [ $attempt -le $max_retries ]; do
+            md5_output=$(rclone md5sum "$VDI_RCLONE_DEST" --include "${ESCAPED_VDI_NAME}.part.*" 2>&1)
+            rclone_exit=$?
+
+            if [ $rclone_exit -eq 0 ] || [ $rclone_exit -eq 3 ]; then
+                break
+            fi
+
+            echo "    WARNING: 'rclone md5sum' failed for $VDI_NAME (Attempt $attempt/$max_retries, Exit Code: $rclone_exit)."
+            [ $attempt -lt $max_retries ] && sleep 5
+            ((attempt++))
+        done
+
+        if [ $rclone_exit -eq 3 ]; then
+            echo "    Notice: Remote directory does not exist yet for $VDI_NAME (initial backup required)."
+        elif [ $rclone_exit -ne 0 ]; then
+            echo -e "\n======================================================================"
+            echo " FATAL PRE-FLIGHT ERROR: Failed to retrieve MD5 sums for $VDI_NAME"
+            echo " Command: rclone md5sum \"$VDI_RCLONE_DEST\" --include \"${ESCAPED_VDI_NAME}.part.*\""
+            echo " Exit Code: $rclone_exit"
+            echo " Output:"
+            echo "$md5_output"
+            echo "======================================================================\n"
+            PREFLIGHT_FAILED=true
+        else
+            count=0
+            while read -r md5 path; do
+                [ -z "$md5" ] && continue
+                part_name=$(basename "$path")
+                ALL_REMOTE_MD5S["${vdi_file}:${part_name}"]="$md5"
+                ((count++))
+            done <<< "$md5_output"
+            echo "    Success: Cached $count remote part hashes."
+        fi
+    done
+done
+
+if [ "$PREFLIGHT_FAILED" = true ]; then
+    echo -e "\n======================================================================"
+    echo " ABORTING: Pre-flight check failed for one or more VM directories."
+    echo "======================================================================\n"
+    exit 1
+fi
+echo -e "=== Pre-flight Check Passed Successfully ===\n"
+
+for vm_dir in "${VM_DIRS[@]}"; do
+    DIR_NAME=$(basename "$vm_dir")
+
+    SKIP=false
+    for skip_dir in "${SKIP_DIRS[@]}"; do
+        [[ "$DIR_NAME" == "$skip_dir" ]] && SKIP=true && break
+    done
+
+   # If we haven't skipped yet, and the ONLY_DIRS whitelist exists, check it
     if ! $SKIP && [[ -n "${ONLY_DIRS+x}" ]] && (( ${#ONLY_DIRS[@]} > 0 )); then
         SKIP=true # Assume we skip unless it's in the whitelist
         for only_dir in "${ONLY_DIRS[@]}"; do
@@ -134,12 +236,13 @@ for vm_dir in "${VM_DIRS[@]}"; do
         VDI_NAME=$(basename "$vdi_file")
         echo "  Comparing md5sums of remote parts to $VDI_NAME"
 
-        # Fetch remote MD5s into an associative array
-        declare -A REMOTE_MD5S=()  # Declare and set to empty each loop pass
-        while read -r md5 path; do
-            part_name=$(basename "$path")
-            REMOTE_MD5S["$part_name"]="$md5"
-        done < <(rclone md5sum "$RCLONE_DESTINATION" --include "${VDI_NAME}.part.*" 2>/dev/null)
+        declare -A REMOTE_MD5S=()
+        for key in "${!ALL_REMOTE_MD5S[@]}"; do
+            if [[ "$key" == "${vdi_file}:"* ]]; then
+                part_name="${key#${vdi_file}:}"
+                REMOTE_MD5S["$part_name"]="${ALL_REMOTE_MD5S[$key]}"
+            fi
+        done
 
         # Calculate required blocks
         FILE_SIZE=$(stat -c%s "$vdi_file")
@@ -220,6 +323,10 @@ for vm_dir in "${VM_DIRS[@]}"; do
          --inplace \
          --stats-one-line-date \
          --stats 2m
+    SYNC_EXIT=$?
+    if [ $SYNC_EXIT -ne 0 ]; then
+        echo "  ERROR: 'rclone sync' failed for $DIR_NAME with exit code $SYNC_EXIT."
+    fi
 
     # Cleanup local temporary files
     echo "  Cleaning up local temporary files..."
