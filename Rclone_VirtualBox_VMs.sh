@@ -195,6 +195,9 @@ if [ "$PREFLIGHT_FAILED" = true ]; then
 fi
 echo -e "=== Pre-flight Check Passed Successfully ===\n"
 
+POSTFLIGHT_FAILED=false
+FAILED_VMS=()
+
 for vm_dir in "${VM_DIRS[@]}"; do
     DIR_NAME=$(basename "$vm_dir")
 
@@ -222,6 +225,9 @@ for vm_dir in "${VM_DIRS[@]}"; do
     echo -e "\n--- Processing VM Directory: $vm_dir ---"
     RELATIVE_PATH=$(realpath --relative-to="$SOURCE_BASE_DIR" "$vm_dir")
     RCLONE_DESTINATION="$RCLONE_REMOTE_BASE/$RELATIVE_PATH"
+
+    # Associative array to track expected remote files and their MD5 checksums for this VM
+    declare -A EXPECTED_REMOTE_MD5S=()
 
     # Default rclone flags for this VM
     # Start with --delete-excluded and remove it to protect remote parts
@@ -263,6 +269,11 @@ for vm_dir in "${VM_DIRS[@]}"; do
 
                 # Calculate local MD5 for the specific block using dd
                 LOCAL_MD5=$(dd if="$vdi_file" bs=1M skip=$((i * CHUNK_SIZE_MB)) count=$CHUNK_SIZE_MB 2>/dev/null | md5sum | awk '{print $1}')
+
+                vdi_dir=$(dirname "$vdi_file")
+                vdi_rel_dir=$(realpath --relative-to="$SOURCE_BASE_DIR" "$vdi_dir")
+                part_rel_path="${vdi_rel_dir}/${PART_NAME}"
+                EXPECTED_REMOTE_MD5S["$part_rel_path"]="$LOCAL_MD5"
 
                 if [[ "$LOCAL_MD5" != "${REMOTE_MD5S[$PART_NAME]}" ]]; then
                     echo -e "    Block $PART_LABEL differs. Sync required."
@@ -329,6 +340,82 @@ for vm_dir in "${VM_DIRS[@]}"; do
         echo "  ERROR: 'rclone sync' failed for $DIR_NAME with exit code $SYNC_EXIT."
     fi
 
+    # Record expected remote files & MD5s for non-VDI files and newly generated VDI parts
+    readarray -d '' ALL_LOCAL_FILES < <(find "$vm_dir" -type f ! -name "*.vdi" -print0)
+    for loc_file in "${ALL_LOCAL_FILES[@]}"; do
+        rel_path=$(realpath --relative-to="$SOURCE_BASE_DIR" "$loc_file")
+        # If NEEDS_SYNC was true for a VDI, update the expected MD5 with the newly split part hash
+        if [[ -z "${EXPECTED_REMOTE_MD5S[$rel_path]}" ]] || [[ "$loc_file" == *.vdi.part.* ]]; then
+            loc_md5=$(md5sum "$loc_file" | awk '{print $1}')
+            EXPECTED_REMOTE_MD5S["$rel_path"]="$loc_md5"
+        fi
+    done
+
+    # Run Post-flight Verification Check for this VM directory
+    echo "  [Post-flight] Verifying remote MD5 checksums for $DIR_NAME..."
+    max_retries=3
+    attempt=1
+    postflight_output=""
+    rclone_exit=0
+
+    while [ $attempt -le $max_retries ]; do
+        postflight_output=$(rclone md5sum "$RCLONE_DESTINATION" 2>&1)
+        rclone_exit=$?
+
+        if [ $rclone_exit -eq 0 ] || [ $rclone_exit -eq 3 ]; then
+            break
+        fi
+
+        echo "    WARNING: 'rclone md5sum' failed during post-flight for $DIR_NAME (Attempt $attempt/$max_retries, Exit Code: $rclone_exit)."
+        [ $attempt -lt $max_retries ] && sleep 5
+        ((attempt++))
+    done
+
+    declare -A ACTUAL_REMOTE_MD5S=()
+    if [ $rclone_exit -eq 0 ]; then
+        while read -r md5 path; do
+            [ -z "$md5" ] && continue
+            rel_file="${RELATIVE_PATH}/${path}"
+            rel_file=$(echo "$rel_file" | sed 's|/\./|/|g; s|^\./||')
+            ACTUAL_REMOTE_MD5S["$rel_file"]="$md5"
+        done <<< "$postflight_output"
+    fi
+
+    VM_POSTFLIGHT_ERRORS=0
+
+    if [ $rclone_exit -ne 0 ]; then
+        echo "    ERROR [Post-flight]: Failed to retrieve remote MD5 checksums for $DIR_NAME (Exit Code: $rclone_exit)."
+        ((VM_POSTFLIGHT_ERRORS++))
+    else
+        # Check expected files against actual remote files
+        for expected_rel in "${!EXPECTED_REMOTE_MD5S[@]}"; do
+            expected_md5="${EXPECTED_REMOTE_MD5S[$expected_rel]}"
+            if [[ -z "${ACTUAL_REMOTE_MD5S[$expected_rel]+x}" ]]; then
+                echo "    ERROR [Post-flight]: Missing expected remote file: $expected_rel"
+                ((VM_POSTFLIGHT_ERRORS++))
+            elif [[ "${ACTUAL_REMOTE_MD5S[$expected_rel]}" != "$expected_md5" ]]; then
+                echo "    ERROR [Post-flight]: MD5 mismatch for $expected_rel (Expected: $expected_md5, Remote: ${ACTUAL_REMOTE_MD5S[$expected_rel]})"
+                ((VM_POSTFLIGHT_ERRORS++))
+            fi
+        done
+
+        # Check for unexpected files on remote
+        for actual_rel in "${!ACTUAL_REMOTE_MD5S[@]}"; do
+            if [[ -z "${EXPECTED_REMOTE_MD5S[$actual_rel]+x}" ]]; then
+                echo "    ERROR [Post-flight]: Unexpected file found on remote: $actual_rel (MD5: ${ACTUAL_REMOTE_MD5S[$actual_rel]})"
+                ((VM_POSTFLIGHT_ERRORS++))
+            fi
+        done
+    fi
+
+    if [ $VM_POSTFLIGHT_ERRORS -gt 0 ]; then
+        echo "  [Post-flight] FAILED for $DIR_NAME ($VM_POSTFLIGHT_ERRORS error(s) detected)."
+        POSTFLIGHT_FAILED=true
+        FAILED_VMS+=("$DIR_NAME")
+    else
+        echo "  [Post-flight] Success: Verified remote MD5 checksums for $DIR_NAME."
+    fi
+
     # Cleanup local temporary files
     echo "  Cleaning up local temporary files..."
     find "$vm_dir" -name "*.vdi.part.*" -delete
@@ -337,5 +424,17 @@ for vm_dir in "${VM_DIRS[@]}"; do
     echo "Finished processing directory: $vm_dir"
     echo "--------------------------------------------------"
 done
+
+if [ "$POSTFLIGHT_FAILED" = true ]; then
+    echo -e "\n======================================================================"
+    echo " FATAL ERROR: Post-flight verification failed for the following VM(s):"
+    for failed_vm in "${FAILED_VMS[@]}"; do
+        echo "   - $failed_vm"
+    done
+    echo "======================================================================\n"
+    exit 1
+else
+    echo -e "\n=== All Post-flight Verification Checks Passed Successfully ==="
+fi
 
 echo -e "\nBackup process finished."
