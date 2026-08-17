@@ -234,6 +234,7 @@ for vm_dir in "${VM_DIRS[@]}"; do
 
     for vdi_file in "${VDI_FILES[@]}"; do
         VDI_NAME=$(basename "$vdi_file")
+        ESCAPED_VDI_NAME=$(echo "$VDI_NAME" | sed 's/{/\\{/g; s/}/\\}/g')
         echo "  Comparing md5sums of remote parts to $VDI_NAME"
 
         declare -A REMOTE_MD5S=()
@@ -288,7 +289,7 @@ for vm_dir in "${VM_DIRS[@]}"; do
         else
             echo "    Remote and local match. Disabling --delete-excluded to protect remote parts."
             # To protect remote parts that aren't local, we MUST exclude them and turn off --delete-excluded
-            RCLONE_FILTER_ARGS+=("--filter" "- ${VDI_NAME}.part.*")
+            RCLONE_FILTER_ARGS+=("--filter" "- ${ESCAPED_VDI_NAME}.part.*")
             RCLONE_DELETE_FLAG=""
         fi
     done
